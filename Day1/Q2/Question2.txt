@@ -1,0 +1,45 @@
+a) 
+1) DO loop 1
+DO i = 2,n
+	d(i) = a(i-1)-d(i)
+	a(i) = b(i-1)+d(i)
+END DO
+For i = 3: d(3)=a(2)-d(3), a(3) = b(2)+d(3), and for i=4 d(4)=a(3)-d(4), a(4) = b(3)+d(4) - showing that i=4 dependence on i=3 by the update of a(3)
+2) DO loop 2
+DO i = 2,n
+	a(i) = b(i-1)+d(i)
+	d(i) = a(i-1)-d(i)	
+END DO
+The loop can be completly vectorized as:
+a(2:n) = b(1:n-1)+d(2:n)
+d(2:n) = a(1:n-1)-d(2:n)
+This is possible since a(i-1) is update in the loop before it is used to update d. 
+
+b) 
+DO i = 1+p,n+p
+	a(i) = a(i-p)*b(i)
+END DO
+Can be partly parallelized as:
+DO i = 1+p,n+p,p
+	a(i:i+p-1) = a(i-p:i-1)*b(i:i+p-1)
+END DO
+The above can be used for p>2, but not for p=1 where the loop can not be vectorize. For p=>n (and as well as p=0) it can be written as:
+a(1+p:n+p) = a(1:n)*b(1+p:n+p)
+The graph of the wall time is expected to have lower bound as the time for p=0, and have a decreasing time as p increase until p=n from where the time will be allmost the same as for p=0 (except the additional time for getting other a(1:n) instead of a(1+p:n+p)). The graph is going to look like:
+
+	|
+t(p=1) 	|  *
+  	|    *
+  	|      *
+  	|        *
+  	|          *
+  	|            *
+  	|              *
+  	|                *
+	|                  *
+	|                    *  
+	|                      *
+	|                        *
+t(p=0)  |*                         * * * * * * *
+	|_______________________________________
+	 0  1      ....            n   ....
