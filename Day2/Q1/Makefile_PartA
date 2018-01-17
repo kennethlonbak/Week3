@@ -1,4 +1,4 @@
-TARGET	= Bandwidth_MPI
+TARGET	= Ping_Pong_MPI
 OBJS	= $(TARGET).o
 TARGET_ext = .prog
 
