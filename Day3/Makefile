@@ -3,7 +3,7 @@ OBJS	= m_$(TARGET).o $(TARGET).o
 TARGET_EXT = .prog
 
 FC  	= mpif90
-FFLAGS = -free
+FFLAGS = -free -g -O0
 
 all: $(TARGET)
 

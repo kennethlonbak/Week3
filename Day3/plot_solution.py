@@ -14,16 +14,16 @@ def main():
     x = py.arange(N)*dx-1
 
     fig,ax = py.subplots(1,1,figsize=(6,4))
-    pcol = ax.pcolor(x,x,data)
+    pcol = ax.imshow(data,interpolation='none',origin='lower',extent=[0.5,N+0.5,0.5,N+0.5])
     fig.colorbar(pcol,ax=ax)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
+    ax.set_xlabel("j")
+    ax.set_ylabel("i")
     ax.set_title("Solver type: "+ info["solver_type"])
     py.show()
 
 def read_data(filename, header_lines = 10):
 
-    data = py.loadtxt(filename, skiprows=header_lines).transpose()
+    data = py.loadtxt(filename, skiprows=header_lines)
     info = {}
     with open(filename,"r") as file:
         for i in range(header_lines):

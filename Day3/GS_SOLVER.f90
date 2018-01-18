@@ -2,8 +2,6 @@ program GS_SOLVER
     ! Declearing variabels
     USE m_gs_solver
 
-
-    WRITE(*,*) "--------------------------- STARTING SOLVER ------------------------------------"
     ! Initlize variabels
     CALL initilize
 
@@ -18,17 +16,19 @@ program GS_SOLVER
     end if
 
     ! Solve via Jacobi solver
+    wall_time = MPI_WTIME()
     IF (solver_type == 2) THEN
         CALL RB_GS_SEQ
     ELSE IF (solver_type == 3) THEN
         CALL GS_SEQ
     ELSE IF (solver_type == 1) THEN
-        CALL RB_GS_PAL(N,k_max,d_min,uk,fdx2,wall_time,k,d,show_state,mod_state)
+        CALL RB_GS_PAL
     end if
-
+    WRITE(*,*) "Wall time=", MPI_WTIME()-wall_time, " secounds"
     ! Write out soulution to text file
-    CALL write_matrix(uk,filename,write_mat)
+    IF (rank == 0) THEN
+       CALL write_matrix(uk,filename,write_mat)
+    END IF
 
-    WRITE(*,*) "------------------------------ ENDING SOLVER -----------------------------------"
-    WRITE(*,*)
+
 end program GS_SOLVER

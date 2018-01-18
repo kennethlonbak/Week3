@@ -1,4 +1,6 @@
 MODULE m_GS_solver
+
+    INCLUDE 'mpif.h'
     INTERFACE read_vari_arg
         MODULE PROCEDURE read_vari_arg_integer, read_vari_arg_double, read_vari_arg_char, read_vari_arg_logical
     END INTERFACE read_vari_arg
@@ -6,132 +8,293 @@ MODULE m_GS_solver
     INTEGER, PARAMETER :: MK = KIND(0d0)
     ! Variabels that can be changed by user
     INTEGER :: N, k_max, k, N_th
-    REAL(MK) :: d_min, d
+    REAL(MK) :: d_min, d_loc, d
     CHARACTER(LEN=200) :: filename
     ! Variabels to be used by the solver
     REAL(MK), DIMENSION(:,:), ALLOCATABLE :: uk, fdx2
-    REAL(MK) :: dx, dx2, wall_time
+    REAL(MK), DIMENSION(:), ALLOCATABLE :: bus,bds,bls,brs
+    REAL(MK), DIMENSION(:), ALLOCATABLE :: bur,bdr,blr,brr
+    REAL(MK) :: dx, dx2
+    REAL(8) :: wall_time
     INTEGER :: solver_type ! Solver type: 1= Jacobi, 2=Gauss-Seidel
     INTEGER :: mod_state, problem
     LOGICAL :: show_state, write_mat
 
+    ! MPI variabels
+    INTEGER, PARAMETER :: ndim = 2
+    INTEGER :: rank, Nproc, ierror, CART_COMM, i_dir,  i_dest
+    INTEGER, DIMENSION(4) :: src, dest, handle, tag
+    LOGICAL, DIMENSION(ndim) :: wrap = .false.
+    INTEGER, DIMENSION(ndim) :: dimsize, coords, dims, coor_temp
+    INTEGER :: status(MPI_STATUS_SIZE), i_bu, i_bd, j_bl, j_br
+    INTEGER :: i, j, rb_i, i_min, i_max, j_min, j_max, i_size, j_size
+
     CONTAINS
-    SUBROUTINE RB_GS_PAL(N,k_max,d_min,uk,fdx2,wall_time,k,d,show_state,mod_state)
-
+    SUBROUTINE RB_GS_PAL
         IMPLICIT NONE
-        INCLUDE 'mpif.h'
-        INTEGER, INTENT(IN) :: N, k_max
-        REAL(MK), DIMENSION(N,N), INTENT(INOUT) :: uk
-        REAL(MK), DIMENSION(N,N), INTENT(IN) :: fdx2
-        REAL(MK), INTENT(IN) :: d_min
-        INTEGER, INTENT(OUT), OPTIONAL :: k
-        REAL(MK), INTENT(OUT), OPTIONAL :: d, wall_time
-        LOGICAL :: show_state
-        INTEGER :: mod_state
-        INTEGER :: i, j, rb_i, rank, Nproc, ierror
-
         ! Initialize MPI
         CALL MPI_INIT(ierror)
         CALL MPI_COMM_SIZE(MPI_COMM_WORLD, Nproc, ierror)
         CALL MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierror)
 
-        ! Determine grid layout
+        ! Making grid layout
         SELECT CASE (Nproc)
             CASE (1)
-                WRITE(*,*) "Can not run use Nproc=1, program is terminated"
+                PRINT *, "It is not possible to use Nproc=1. Use solver_type=2 or 3 for that"
                 CALL MPI_FINALIZE(ierror)
                 STOP
+            CASE (2)
+                dimsize(1) = 2
+                dimsize(2) = 1
+            CASE (4)
+                dimsize(1) = 2
+                dimsize(2) = 2
+            CASE (6)
+                dimsize(1) = 3
+                dimsize(2) = 2
+            CASE (8)
+                dimsize(1) = 4
+                dimsize(2) = 2
+            CASE (9)
+                dimsize(1) = 3
+                dimsize(2) = 3
             CASE DEFAULT
-                WRITE(*,*) "NOT implemented yet, Rank ", rank," Nproc ", Nproc
+                PRINT *, "Only Nproc=2,4 is supported"
                 CALL MPI_FINALIZE(ierror)
                 STOP
         END SELECT
 
+        ! Creating cart communicator
+        CALL MPI_Cart_create(MPI_COMM_WORLD,ndim,dimsize,wrap,.true.,CART_COMM,ierror)
 
-        WRITE(*,*)
-        WRITE(*,*) "Starting RB GS PAL iterations. (Rank",rank, "k_max=",k_max," N=",N," d_min=",d_min,")"
+        ! Getting the coordinates for each process
+        CALL MPI_Cart_get(cart_comm,ndim,dimsize,wrap,coords,ierror)
+        CALL MPI_Cart_rank(cart_comm,coords,rank,ierror)
+        !PRINT*,"Coords:",coords, " dimsize:", dimsize
 
+        ! Make sub grid limits from coords
+        j_min = FLOOR(coords(1)*N/REAL(dimsize(1)))+1
+        j_max = FLOOR((coords(1)+1)*N/REAL(dimsize(1)))
+        i_min = FLOOR(coords(2)*N/REAL(dimsize(2)))+1
+        i_max = FLOOR((coords(2)+1)*N/REAL(dimsize(2)))
+        i_size = i_max-i_min+1
+        j_size = j_max-j_min+1
+
+        ! Getting naibour location
+        CALL MPI_Cart_shift(cart_comm, 1, 1, src(1), dest(1), ierror) ! Up
+        CALL MPI_Cart_shift(cart_comm, 1,-1, src(2), dest(2), ierror) ! Down
+        CALL MPI_Cart_shift(cart_comm, 0,-1, src(3), dest(3), ierror) ! Left
+        CALL MPI_Cart_shift(cart_comm, 0, 1, src(4), dest(4), ierror) ! Right
+
+        ! Checking if process is at global bounday
+        IF (dest(1) == MPI_PROC_NULL) THEN ! Up
+            i_bu = 1
+        ELSE
+            i_bu = 0
+        END IF
+        IF (dest(2) == MPI_PROC_NULL) THEN ! Down
+            i_bd = 1
+        ELSE
+            i_bd = 0
+        END IF
+        IF (dest(3) == MPI_PROC_NULL) THEN ! Left
+            j_bl = 1
+        ELSE
+            j_bl = 0
+        END IF
+        IF (dest(4) == MPI_PROC_NULL) THEN ! Right
+            j_br = 1
+        ELSE
+            j_br = 0
+        END IF
+
+        ! Allocating bond array
+        ALLOCATE(bus(j_size),bds(j_size),bls(i_size),brs(i_size))
+        ALLOCATE(bur(j_size),bdr(j_size),blr(i_size),brr(i_size))
+        !CALL PRINT_RANK_AND_NAI(2)
         DO k = 1,k_max
-            d = 0d0
 
-            DO i=2,N-1
-                IF (MOD(i,2) == 0) THEN
+            DO j=j_min+j_bl,j_max-j_br
+                IF (MOD(j,2) == 0) THEN
                     rb_i = 0
                 ELSE
                     rb_i = 1
                 END IF
 
-                DO j=2+rb_i,N-1+rb_i,2
+                DO i=i_min+i_bd+rb_i,i_max-i_bu+rb_i,2
                     uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
-                    d = d + (uk(i,j)-uk(i,j))**2
                 END DO
             END DO
-            DO i=2,N-1
-                IF (MOD(i,2) == 0) THEN
+
+            ! Update Ghost points
+            CALL UPDATE_GHOST
+
+            ! BLACK grid ---------------------------------------------------- !
+            ! Send and recive bond on BLACK grid
+            DO j=j_min+j_bl,j_max-j_br
+                IF (MOD(j,2) == 0) THEN
                     rb_i = 1
                 ELSE
                     rb_i = 0
                 END IF
-                DO j=2+rb_i,N-1+rb_i,2
+
+                DO i=i_min+i_bd+rb_i,i_max-i_bu+rb_i,2
                     uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
-                    d = d + (uk(i,j)-uk(i,j))**2
                 END DO
             END DO
+
+            ! Update Ghost points
+            CALL UPDATE_GHOST
+
+            ! Calculating residual
+            d_loc = get_residual()
+            CALL MPI_Allreduce(d_loc, d, 1, MPI_DOUBLE_PRECISION, MPI_SUM, cart_comm, ierror)
+
             ! Build convergence cretia
-            IF (d < d_min.and.(k > 10)) THEN
-                WRITE(*,*) "The solver converged after: ", k, "Iterations (k_max: ", k_max, ")"
-                WRITE(*,"(A,ES8.2E2,A,ES8.2E2,A)") " d: ", d, " (d_min:",d_min,")"
+            IF (d < d_min) THEN
+
                 exit
             end if
 
-            IF (MOD(k,mod_state)==0.and.show_state) THEN
-                WRITE(*,"(A,I4,A,ES8.2E2,A)") " Solution is not converged yet. (k= ",k,", d= ",d,")"
-            end if
-        end do
 
-        IF (k > k_max) THEN
-            WRITE(*,*)
-            WRITE(*,*) "!! WARNING: The solver did NOT converge within k_max:", k_max, " !!"
-            WRITE(*,"(A,ES8.2E2,A,ES8.2E2,A)") " d: ", d, " (d_min:",d_min,")"
-            WRITE(*,*)
-        end if
-        WRITE(*,*) "Wall time=", wall_time, " secounds"
+        end do
+        IF (rank==0) THEN
+            IF (k > k_max) THEN
+                !WRITE(*,*)
+                WRITE(*,*) "!! WARNING: The solver did NOT converge within k_max:", k_max, " !!"
+                WRITE(*,"(A,ES8.2E2,A,ES8.2E2,A)") " d: ", d, " (d_min:",d_min,")"
+                !WRITE(*,*)
+            ELSE
+                WRITE(*,*) "The solver converged after: ", k, "Iterations (k_max: ", k_max, ")"
+                WRITE(*,"(A,ES8.2E2,A,ES8.2E2,A)") " d: ", d, " (d_min:",d_min,")"
+            end if
+        END IF
+
+        ! Collecting matrix
+        IF (rank == 0) THEN
+            DO i = 1,Nproc-1
+                ! Get i,j range (i_min, i_max, j_min, j_max)
+                CALL MPI_Recv(i_min,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
+                CALL MPI_Recv(i_max,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
+                CALL MPI_Recv(j_min,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
+                CALL MPI_Recv(j_max,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
+
+                ! Send each vector in
+                DO j = j_min,j_max
+                    CALL MPI_Recv(bls, i_size,MPI_DOUBLE_PRECISION,i,1,cart_comm,status,ierror)
+                    uk(i_min:i_max,j)=bls
+                END DO
+            END DO
+        ELSE
+            ! Send i,j range (i_min, i_max, j_min, j_max)
+            CALL MPI_Ssend(i_min, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
+            CALL MPI_Ssend(i_max, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
+            CALL MPI_Ssend(j_min, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
+            CALL MPI_Ssend(j_max, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
+            i_size = i_max-i_min+1
+
+            ! Send rows in matrix
+            DO j = j_min,j_max
+                bls = uk(i_min:i_max,j)
+                CALL MPI_Ssend(bls, i_size,MPI_DOUBLE_PRECISION, 0, 1 ,cart_comm, ierror)
+            END DO
+        END IF
         CALL MPI_FINALIZE(ierror)
     END SUBROUTINE RB_GS_PAL
 
+    SUBROUTINE UPDATE_GHOST
+            ! SEND -------------------------------------------- !
+            ! Up
+            bus = uk(i_max,j_min:j_max)
+            CALL MPI_ISsend(bus, j_size,MPI_DOUBLE_PRECISION, dest(1),1 ,cart_comm, handle(1), ierror)
+            ! Down
+            bds = uk(i_min,j_min:j_max)
+            CALL MPI_ISsend(bds, j_size,MPI_DOUBLE_PRECISION, dest(2),1 ,cart_comm, handle(2), ierror)
+            ! Left
+            bls = uk(i_min:i_max,j_min)
+            CALL MPI_ISsend(bls, i_size,MPI_DOUBLE_PRECISION, dest(3),1 ,cart_comm, handle(3), ierror)
+            ! Right
+            brs = uk(i_min:i_max,j_max)
+            CALL MPI_ISsend(brs, i_size,MPI_DOUBLE_PRECISION, dest(4),1 ,cart_comm, handle(4), ierror)
+
+            ! Recive ------------------------------------------ !
+            ! Up
+            CALL MPI_IRECV(bur, j_size,MPI_DOUBLE_PRECISION, dest(1), 1, cart_comm, status, ierror)
+            ! Down
+            CALL MPI_IRECV(bdr, j_size,MPI_DOUBLE_PRECISION, dest(2), 1, cart_comm, status, ierror)
+            ! Left
+            CALL MPI_IRECV(blr, i_size,MPI_DOUBLE_PRECISION, dest(3), 1, cart_comm, status, ierror)
+            ! Down
+            CALL MPI_IRECV(brr, i_size,MPI_DOUBLE_PRECISION, dest(4), 1, cart_comm, status, ierror)
+
+            ! Wait ------------------------------------------- !
+            ! Up
+            CALL MPI_Wait(handle(1),status,ierror)
+            ! Down
+            CALL MPI_Wait(handle(2),status,ierror)
+            ! Left
+            CALL MPI_Wait(handle(3),status,ierror)
+            ! Right
+            CALL MPI_Wait(handle(4),status,ierror)
+
+            ! Setting Ghost points --------------------------- !
+            ! Up
+            IF (dest(1) /= MPI_PROC_NULL) THEN
+                uk(i_max+1,j_min:j_max) = bur
+            END IF
+            ! Down
+            IF (dest(2) /= MPI_PROC_NULL) THEN
+                uk(i_min-1,j_min:j_max) = bdr(1:i_size)
+            END IF
+            ! Left
+            IF (dest(3) /= MPI_PROC_NULL) THEN
+                uk(i_min:i_max,j_min-1) = blr(1:i_size)
+            END IF
+            ! Right
+            IF (dest(4) /= MPI_PROC_NULL) THEN
+                uk(i_min:i_max,j_max+1) = brr(1:i_size)
+            END IF
+    END SUBROUTINE UPDATE_GHOST
+
     SUBROUTINE RB_GS_SEQ
-        INTEGER :: i, j, rb_i
-
-
+        i_min=1; i_max = N
+        i_bu=1; i_bd=1
+        j_min=1; j_max = N
+        j_bl=1; j_br=1
         WRITE(*,*)
         WRITE(*,*) "Starting RB GS SEQ iterations. (k_max=",k_max," N=",N," d_min=",d_min,")"
 
         DO k = 1,k_max
             d = 0d0
 
-            DO i=2,N-1
-                IF (MOD(i,2) == 0) THEN
+            ! Red grid
+            DO j=2,N-1
+                IF (MOD(j,2) == 0) THEN
                     rb_i = 0
                 ELSE
                     rb_i = 1
                 END IF
 
-                DO j=2+rb_i,N-1+rb_i,2
+                DO i=2+rb_i,N-1+rb_i,2
                     uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
-                    d = d + (uk(i,j)-uk(i,j))**2
                 END DO
             END DO
-            DO i=2,N-1
-                IF (MOD(i,2) == 0) THEN
+
+            ! Black grid
+            DO j=2,N-1
+                IF (MOD(j,2) == 0) THEN
                     rb_i = 1
                 ELSE
                     rb_i = 0
                 END IF
-                DO j=2+rb_i,N-1+rb_i,2
+                DO i=2+rb_i,N-1+rb_i,2
                     uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
-                    d = d + (uk(i,j)-uk(i,j))**2
                 END DO
             END DO
+
+            ! Calculating residual
+            d = get_residual()
+
             ! Build convergence cretia
             IF (d < d_min.and.(k > 10)) THEN
                 WRITE(*,*) "The solver converged after: ", k, "Iterations (k_max: ", k_max, ")"
@@ -140,9 +303,11 @@ MODULE m_GS_solver
             end if
 
             IF (MOD(k,mod_state)==0.and.show_state) THEN
-                WRITE(*,"(A,I4,A,ES8.2E2,A)") " Solution is not converged yet. (k= ",k,", d= ",d,")"
+                WRITE(*,"(A,I5,A,ES8.2E2,A)") " Solution is not converged yet. (k= ",k,", d= ",d,")"
             end if
         end do
+
+
 
         IF (k > k_max) THEN
             WRITE(*,*)
@@ -150,13 +315,14 @@ MODULE m_GS_solver
             WRITE(*,"(A,ES8.2E2,A,ES8.2E2,A)") " d: ", d, " (d_min:",d_min,")"
             WRITE(*,*)
         end if
-        WRITE(*,*) "Wall time=", wall_time, " secounds"
 
     END SUBROUTINE RB_GS_SEQ
 
     SUBROUTINE GS_SEQ
-        INTEGER :: i, j
-
+        i_min=1; i_max = N
+        i_bu=1; i_bd=1
+        j_min=1; j_max = N
+        j_bl=1; j_br=1
 
         WRITE(*,*)
         WRITE(*,*) "Starting GS SEQ iterations. (k_max=",k_max," N=",N," d_min=",d_min,")"
@@ -167,12 +333,10 @@ MODULE m_GS_solver
                     uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
                 END DO
             END DO
-            d = 0d0
-            DO i=2,N-1
-                DO j=2,N-1
-                    d = d + abs((uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)-4d0*uk(i,j))/dx2-1)
-                END DO
-            END DO
+
+            ! Calculating residual
+            d = get_residual()
+
             ! Build convergence cretia
             IF (d < d_min.and.(k > 10)) THEN
                 WRITE(*,*) "The solver converged after: ", k, "Iterations (k_max: ", k_max, ")"
@@ -191,12 +355,14 @@ MODULE m_GS_solver
             WRITE(*,"(A,ES8.2E2,A,ES8.2E2,A)") " d: ", d, " (d_min:",d_min,")"
             WRITE(*,*)
         end if
-        WRITE(*,*) "Wall time=", wall_time, " secounds"
 
     END SUBROUTINE GS_SEQ
 
     SUBROUTINE initilize
         CHARACTER(LEN=200) :: temp_name
+
+        ! Default MPI values (Only used in seq mode)
+        rank = 0
 
         ! Set N, k_max, d_min (Reads from argument or sets default value)
         N = read_vari_arg("N",100)
@@ -251,6 +417,17 @@ MODULE m_GS_solver
         fdx2 = -dx2
     END SUBROUTINE set_f
 
+    FUNCTION get_residual()
+        REAL(MK) :: get_residual
+        d = 0d0
+        DO j=j_min+j_bl,j_max-j_br
+            DO i=i_min+i_bd,i_max-i_bu
+                d = d + abs((uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)-4d0*uk(i,j))/dx2-1d0)
+            END DO
+        END DO
+        get_residual = d
+    END FUNCTION get_residual
+
     SUBROUTINE write_matrix(mat, filename, write_mat)
         REAL(MK), DIMENSION(:,:), INTENT(IN) :: mat
         CHARACTER(LEN=*), INTENT(IN) :: filename
@@ -277,7 +454,8 @@ MODULE m_GS_solver
             WRITE(61,*) "solver_type= Red-Black GS SEQ"
         ELSE IF (solver_type == 3) THEN
             WRITE(61,*) "solver_type= GS SEQ"
-
+        ELSE IF (solver_type == 1) THEN
+            WRITE(61,*) "solver_type= Red-Black GS Pal"
         end if
 
         IF (problem == 2) THEN
@@ -397,4 +575,34 @@ MODULE m_GS_solver
             end if
         end do
     END FUNCTION read_vari_arg_logical
+
+    SUBROUTINE PRINT_RANK_AND_NAI(rank_in)
+        IMPLICIT NONE
+        INTEGER, INTENT(IN) :: rank_in
+        IF (rank == rank_in) THEN
+            PRINT *, "Rank",rank, " Coords", coords, ": i_min", i_min,&
+                    " i_max", i_max,"j_min",j_min,"j_max",j_max
+            ! Up
+            IF (dest(1) /= MPI_PROC_NULL) THEN
+                CALL MPI_Cart_coords(cart_comm,dest(1),ndim,coor_temp,ierror)
+                PRINT*,"Up, rank:", dest(1), " coo:", coor_temp
+            END IF
+            ! Down
+            IF (dest(2) /= MPI_PROC_NULL) THEN
+                CALL MPI_Cart_coords(cart_comm,dest(2),ndim,coor_temp,ierror)
+                PRINT*,"Down, rank:", dest(2), " coo:", coor_temp
+            END IF
+            ! Left
+            IF (dest(3) /= MPI_PROC_NULL) THEN
+                CALL MPI_Cart_coords(cart_comm,dest(3),ndim,coor_temp,ierror)
+                PRINT*,"Left, rank:", dest(3), " coo:", coor_temp
+            END IF
+            ! Right
+            IF (dest(4) /= MPI_PROC_NULL) THEN
+                CALL MPI_Cart_coords(cart_comm,dest(4),ndim,coor_temp,ierror)
+                PRINT*,"Right, rank:", dest(4), " coo:", coor_temp
+            END IF
+
+        END IF
+    END SUBROUTINE PRINT_RANK_AND_NAI
 end module m_GS_solver
