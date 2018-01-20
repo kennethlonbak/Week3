@@ -2,7 +2,7 @@ import pylab as py
 
 
 def main():
-    filename = "DATA/DATA_N0100.dat"
+    filename = "DATA/DATA_N0101.dat"
     # Load data
     print("Reading data file: %s" % filename)
     info, data = read_data(filename)
@@ -16,8 +16,8 @@ def main():
     fig,ax = py.subplots(1,1,figsize=(6,4))
     pcol = ax.imshow(data,interpolation='none',origin='lower',extent=[0.5,N+0.5,0.5,N+0.5])
     fig.colorbar(pcol,ax=ax)
-    ax.set_xlabel("j")
-    ax.set_ylabel("i")
+    ax.set_xlabel("i")
+    ax.set_ylabel("j")
     ax.set_title("Solver type: "+ info["solver_type"])
     py.show()
 

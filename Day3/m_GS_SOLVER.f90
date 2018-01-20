@@ -26,8 +26,8 @@ MODULE m_GS_solver
     INTEGER, DIMENSION(4) :: src, dest, handle, tag
     LOGICAL, DIMENSION(ndim) :: wrap = .false.
     INTEGER, DIMENSION(ndim) :: dimsize, coords, dims, coor_temp
-    INTEGER :: status(MPI_STATUS_SIZE), i_bu, i_bd, j_bl, j_br
-    INTEGER :: i, j, rb_i, i_min, i_max, j_min, j_max, i_size, j_size
+    INTEGER :: status(MPI_STATUS_SIZE), j_u, j_d, i_l, i_r
+    INTEGER :: i, j, rb_i, i_min, i_max, j_min, j_max, i_size, j_size, is,ie,js,je
 
     CONTAINS
     SUBROUTINE RB_GS_PAL
@@ -73,56 +73,43 @@ MODULE m_GS_solver
         !PRINT*,"Coords:",coords, " dimsize:", dimsize
 
         ! Make sub grid limits from coords
-        j_min = FLOOR(coords(1)*N/REAL(dimsize(1)))+1
-        j_max = FLOOR((coords(1)+1)*N/REAL(dimsize(1)))
         i_min = FLOOR(coords(2)*N/REAL(dimsize(2)))+1
         i_max = FLOOR((coords(2)+1)*N/REAL(dimsize(2)))
+        j_min = FLOOR(coords(1)*N/REAL(dimsize(1)))+1
+        j_max = FLOOR((coords(1)+1)*N/REAL(dimsize(1)))
         i_size = i_max-i_min+1
         j_size = j_max-j_min+1
 
         ! Getting naibour location
-        CALL MPI_Cart_shift(cart_comm, 1, 1, src(1), dest(1), ierror) ! Up
-        CALL MPI_Cart_shift(cart_comm, 1,-1, src(2), dest(2), ierror) ! Down
-        CALL MPI_Cart_shift(cart_comm, 0,-1, src(3), dest(3), ierror) ! Left
-        CALL MPI_Cart_shift(cart_comm, 0, 1, src(4), dest(4), ierror) ! Right
+        CALL MPI_Cart_shift(cart_comm, 0, 1, src(1), dest(1), ierror) ! Up
+        CALL MPI_Cart_shift(cart_comm, 0,-1, src(2), dest(2), ierror) ! Down
+        CALL MPI_Cart_shift(cart_comm, 1,-1, src(3), dest(3), ierror) ! Left
+        CALL MPI_Cart_shift(cart_comm, 1, 1, src(4), dest(4), ierror) ! Right
 
         ! Checking if process is at global bounday
-        IF (dest(1) == MPI_PROC_NULL) THEN ! Up
-            i_bu = 1
-        ELSE
-            i_bu = 0
-        END IF
-        IF (dest(2) == MPI_PROC_NULL) THEN ! Down
-            i_bd = 1
-        ELSE
-            i_bd = 0
-        END IF
-        IF (dest(3) == MPI_PROC_NULL) THEN ! Left
-            j_bl = 1
-        ELSE
-            j_bl = 0
-        END IF
-        IF (dest(4) == MPI_PROC_NULL) THEN ! Right
-            j_br = 1
-        ELSE
-            j_br = 0
-        END IF
+        j_u = logical2integer((dest(1) == MPI_PROC_NULL))
+        j_d = logical2integer((dest(2) == MPI_PROC_NULL))
+        i_l = logical2integer((dest(3) == MPI_PROC_NULL))
+        i_r = logical2integer((dest(4) == MPI_PROC_NULL))
+
+        ! Making run index
+        is = i_min+i_l
+        ie = i_max-i_r
+        js = j_min+j_d
+        je = j_max-j_u
 
         ! Allocating bond array
-        ALLOCATE(bus(j_size),bds(j_size),bls(i_size),brs(i_size))
-        ALLOCATE(bur(j_size),bdr(j_size),blr(i_size),brr(i_size))
-        !CALL PRINT_RANK_AND_NAI(2)
+        ALLOCATE(bus(i_size),bds(i_size),bls(j_size),brs(j_size))
+        ALLOCATE(bur(i_size),bdr(i_size),blr(j_size),brr(j_size))
+
+        CALL PRINT_RANK_AND_NAI(1)
         DO k = 1,k_max
 
-            DO j=j_min+j_bl,j_max-j_br
-                IF (MOD(j,2) == 0) THEN
-                    rb_i = 0
-                ELSE
-                    rb_i = 1
-                END IF
-
-                DO i=i_min+i_bd+rb_i,i_max-i_bu+rb_i,2
-                    uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+            DO j= js,je
+                DO i = is,ie
+                    IF (MOD(i+j,2)==0) THEN
+                        uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+                    END IF
                 END DO
             END DO
 
@@ -131,15 +118,11 @@ MODULE m_GS_solver
 
             ! BLACK grid ---------------------------------------------------- !
             ! Send and recive bond on BLACK grid
-            DO j=j_min+j_bl,j_max-j_br
-                IF (MOD(j,2) == 0) THEN
-                    rb_i = 1
-                ELSE
-                    rb_i = 0
-                END IF
-
-                DO i=i_min+i_bd+rb_i,i_max-i_bu+rb_i,2
-                    uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+            DO j= js,je
+                DO i = is,ie
+                    IF (MOD(i+j,2)/=0) THEN
+                        uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+                    END IF
                 END DO
             END DO
 
@@ -152,12 +135,12 @@ MODULE m_GS_solver
 
             ! Build convergence cretia
             IF (d < d_min) THEN
-
+                !print*,d_loc
                 exit
             end if
 
-
         end do
+
         IF (rank==0) THEN
             IF (k > k_max) THEN
                 !WRITE(*,*)
@@ -178,6 +161,7 @@ MODULE m_GS_solver
                 CALL MPI_Recv(i_max,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
                 CALL MPI_Recv(j_min,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
                 CALL MPI_Recv(j_max,1,MPI_INTEGER,i,1,cart_comm,status,ierror)
+                i_size = i_max-i_min+1
 
                 ! Send each vector in
                 DO j = j_min,j_max
@@ -191,7 +175,6 @@ MODULE m_GS_solver
             CALL MPI_Ssend(i_max, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
             CALL MPI_Ssend(j_min, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
             CALL MPI_Ssend(j_max, 1,MPI_INTEGER, 0, 1 ,cart_comm, ierror)
-            i_size = i_max-i_min+1
 
             ! Send rows in matrix
             DO j = j_min,j_max
@@ -205,17 +188,17 @@ MODULE m_GS_solver
     SUBROUTINE UPDATE_GHOST
             ! SEND -------------------------------------------- !
             ! Up
-            bus = uk(i_max,j_min:j_max)
-            CALL MPI_ISsend(bus, j_size,MPI_DOUBLE_PRECISION, dest(1),1 ,cart_comm, handle(1), ierror)
+            bus(1:i_size) = uk(i_min:i_max,j_max)
+            CALL MPI_ISsend(bus(1:i_size), i_size,MPI_DOUBLE_PRECISION, dest(1),1 ,cart_comm, handle(1), ierror)
             ! Down
-            bds = uk(i_min,j_min:j_max)
-            CALL MPI_ISsend(bds, j_size,MPI_DOUBLE_PRECISION, dest(2),1 ,cart_comm, handle(2), ierror)
+            bds(1:i_size) = uk(i_min:i_max,j_min)
+            CALL MPI_ISsend(bds(1:i_size), i_size,MPI_DOUBLE_PRECISION, dest(2),1 ,cart_comm, handle(2), ierror)
             ! Left
-            bls = uk(i_min:i_max,j_min)
-            CALL MPI_ISsend(bls, i_size,MPI_DOUBLE_PRECISION, dest(3),1 ,cart_comm, handle(3), ierror)
+            bls(1:j_size) = uk(i_min,j_min:j_max)
+            CALL MPI_ISsend(bls(1:j_size), j_size,MPI_DOUBLE_PRECISION, dest(3),1 ,cart_comm, handle(3), ierror)
             ! Right
-            brs = uk(i_min:i_max,j_max)
-            CALL MPI_ISsend(brs, i_size,MPI_DOUBLE_PRECISION, dest(4),1 ,cart_comm, handle(4), ierror)
+            brs(1:j_size) = uk(i_max,j_min:j_max)
+            CALL MPI_ISsend(brs(1:j_size), j_size,MPI_DOUBLE_PRECISION, dest(4),1 ,cart_comm, handle(4), ierror)
 
             ! Recive ------------------------------------------ !
             ! Up
@@ -240,19 +223,19 @@ MODULE m_GS_solver
             ! Setting Ghost points --------------------------- !
             ! Up
             IF (dest(1) /= MPI_PROC_NULL) THEN
-                uk(i_max+1,j_min:j_max) = bur
+                uk(i_min:i_max,j_max+1) = bur(1:i_size)
             END IF
             ! Down
             IF (dest(2) /= MPI_PROC_NULL) THEN
-                uk(i_min-1,j_min:j_max) = bdr(1:i_size)
+                uk(i_min:i_max,j_min-1) = bdr(1:i_size)
             END IF
             ! Left
             IF (dest(3) /= MPI_PROC_NULL) THEN
-                uk(i_min:i_max,j_min-1) = blr(1:i_size)
+                uk(i_min-1,j_min:j_max) = blr(1:i_size)
             END IF
             ! Right
             IF (dest(4) /= MPI_PROC_NULL) THEN
-                uk(i_min:i_max,j_max+1) = brr(1:i_size)
+                uk(i_max+1,j_min:j_max) = brr(1:i_size)
             END IF
     END SUBROUTINE UPDATE_GHOST
 
@@ -267,28 +250,21 @@ MODULE m_GS_solver
         DO k = 1,k_max
             d = 0d0
 
-            ! Red grid
-            DO j=2,N-1
-                IF (MOD(j,2) == 0) THEN
-                    rb_i = 0
-                ELSE
-                    rb_i = 1
-                END IF
-
-                DO i=2+rb_i,N-1+rb_i,2
-                    uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+            DO j= j_min+j_l,j_max-j_r
+                DO i = i_min+i_d,i_max-i_u
+                    IF (MOD(i+j,2)==0) THEN
+                        uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+                    END IF
                 END DO
             END DO
 
-            ! Black grid
-            DO j=2,N-1
-                IF (MOD(j,2) == 0) THEN
-                    rb_i = 1
-                ELSE
-                    rb_i = 0
-                END IF
-                DO i=2+rb_i,N-1+rb_i,2
-                    uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+            ! BLACK grid ---------------------------------------------------- !
+            ! Send and recive bond on BLACK grid
+            DO j= j_min+j_l,j_max-j_r
+                DO i = i_min+i_d,i_max-i_u
+                    IF (MOD(i+j,2)/=0) THEN
+                        uk(i,j) = (uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)+fdx2(i,j))*25d-2
+                    END IF
                 END DO
             END DO
 
@@ -420,8 +396,8 @@ MODULE m_GS_solver
     FUNCTION get_residual()
         REAL(MK) :: get_residual
         d = 0d0
-        DO j=j_min+j_bl,j_max-j_br
-            DO i=i_min+i_bd,i_max-i_bu
+        DO j= js,je
+            DO i = is,ie
                 d = d + abs((uk(i,j-1)+uk(i,j+1)+uk(i-1,j)+uk(i+1,j)-4d0*uk(i,j))/dx2-1d0)
             END DO
         END DO
@@ -472,8 +448,8 @@ MODULE m_GS_solver
 
         IF (write_mat) THEN
             ! writing out matrix
-            DO i = 1,N
-                DO j = 1,N
+            DO j = 1,N
+                DO i = 1,N
                     WRITE(61,"(E16.8E2,A)",advance="no") mat(i,j), " "
                 END DO
                 WRITE(61,"(A)")
@@ -582,6 +558,8 @@ MODULE m_GS_solver
         IF (rank == rank_in) THEN
             PRINT *, "Rank",rank, " Coords", coords, ": i_min", i_min,&
                     " i_max", i_max,"j_min",j_min,"j_max",j_max
+            PRINT*,"j_u",j_u, "j_d", j_d, "i_l",i_l,"i_r",i_r
+            PRINT*,"is",is, " ie",ie, " js", js, " je", je
             ! Up
             IF (dest(1) /= MPI_PROC_NULL) THEN
                 CALL MPI_Cart_coords(cart_comm,dest(1),ndim,coor_temp,ierror)
@@ -605,4 +583,14 @@ MODULE m_GS_solver
 
         END IF
     END SUBROUTINE PRINT_RANK_AND_NAI
+
+    FUNCTION logical2integer(loc_in)
+        INTEGER :: logical2integer
+        LOGICAL, INTENT(IN) :: loc_in
+        IF (loc_in) THEN
+            logical2integer = 1
+        ELSE
+            logical2integer = 0
+        END IF
+    END FUNCTION logical2integer
 end module m_GS_solver
