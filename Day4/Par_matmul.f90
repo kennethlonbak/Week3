@@ -18,8 +18,9 @@ program Par_matmul
     ALLOCATE(C(isize,jsize),A_own(isize,jsize),B_own(isize,jsize))
     ALLOCATE(A_recv(isize,jsize),B_recv(isize,jsize))
     ALLOCATE(sr_vec(isize))
+
     ! Checking the cartisian grid (output to terminal)
-    !CALL check_cart_grid
+    CALL check_cart_grid
 
     ! Make row comunicator
     CALL MPI_Cart_sub(cart_comm,(/.false.,.true./),row_comm,ierror)
@@ -31,7 +32,7 @@ program Par_matmul
 
     ! Generate/load sub matrix
     CALL gen_sub_matrix_cos
-    CALL gen_sub_matrix_rank
+    !CALL gen_sub_matrix_rank
     CALL collect_A_tot
     CALL collect_B_tot
 

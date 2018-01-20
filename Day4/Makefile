@@ -14,6 +14,7 @@ clean:
 	@/bin/rm -fv $(TARGET)$(TARGET_EXT)
 	@/bin/rm -fv $(OBJS)
 	@/bin/rm -fv m_$(TARGET).mod
+	@/bin/rm -fv *.dat
 
 
 %.o: %.f90
